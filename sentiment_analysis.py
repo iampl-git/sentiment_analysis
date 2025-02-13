@@ -1,77 +1,152 @@
-import zipfile
 import os
-import pandas as pd
 import re
+import pandas as pd
+import torch
+import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, confusion_matrix, classification_report
+from transformers import BertTokenizer, BertForSequenceClassification
+from torch.utils.data import DataLoader, TensorDataset
+from torch.optim import AdamW
 
-# Define paths to the zip file and the extraction folder
-zip_path = "C:/Users/Acer/Desktop/sentiment_analysis/training.1600000.processed.noemoticon.csv.zip"
-extract_folder = "sentiment140_data"
+# Define paths
+csv_path = r"C:\Users\Acer\Desktop\sentiment_analysis\sentiment140_data\training.1600000.processed.noemoticon.csv"
 
-# Step 1: Extract the dataset from the zip file if not already extracted
-if not os.path.exists(extract_folder):
-    os.makedirs(extract_folder)
+# Check if file exists
+if not os.path.exists(csv_path):
+    raise FileNotFoundError(f"Dataset not found: {csv_path}")
 
-with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-    zip_ref.extractall(extract_folder)
-
-# Get the path to the CSV file after extraction
-csv_path = os.path.join(extract_folder, "training.1600000.processed.noemoticon.csv")
-
-# Step 2: Load the dataset into a DataFrame
+# Load dataset
 print("Loading dataset...")
-df = pd.read_csv(csv_path, encoding="ISO-8859-1", usecols=[0, 5], names=["sentiment", "text"])
+df = pd.read_csv(csv_path, encoding="ISO-8859-1", usecols=[0, 5], names=["sentiment", "text"], on_bad_lines="skip")
 
-# Step 3: Preprocess the text data (basic cleaning)
+# Preprocess text
 def preprocess_text(text):
-    # Remove URLs
-    text = re.sub(r'http\S+', '', text)
-    # Remove mentions (usernames)
-    text = re.sub(r'@\S+', '', text)
-    # Remove special characters, numbers, and punctuation
-    text = re.sub(r'[^a-zA-Z\s]', '', text)
-    # Convert text to lowercase
-    text = text.lower()
-    return text
+    text = re.sub(r'http\S+', '', text)  # Remove URLs
+    text = re.sub(r'@\S+', '', text)  # Remove mentions
+    text = re.sub(r'[^a-zA-Z\s]', '', text)  # Remove special characters
+    return text.lower().strip()  # Convert to lowercase & remove extra spaces
 
-df['text'] = df['text'].apply(preprocess_text)
+df["text"] = df["text"].astype(str).apply(preprocess_text)
 
-# Step 4: Split the data into training and testing sets (80% train, 20% test)
-X = df['text']
-y = df['sentiment']
+# Convert sentiment labels: 4 -> Positive, 0 -> Negative, Others -> Neutral (2)
+df["sentiment"] = df["sentiment"].map({4: 4, 0: 0}).fillna(2).astype(int)
 
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+# Split dataset (80% train, 20% test)
+X_train, X_test, y_train, y_test = train_test_split(df["text"], df["sentiment"], test_size=0.2, random_state=42)
 
-# Step 5: Vectorize the text data using TF-IDF
-vectorizer = TfidfVectorizer(max_features=5000)
-X_train_tfidf = vectorizer.fit_transform(X_train)
-X_test_tfidf = vectorizer.transform(X_test)
+# Load BERT tokenizer
+tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
 
-# Step 6: Train a Logistic Regression model
-model = LogisticRegression(max_iter=1000)  # Increased max_iter to ensure convergence
-model.fit(X_train_tfidf, y_train)
+def encode_texts(texts):
+    return tokenizer(texts, padding=True, truncation=True, max_length=128, return_tensors="pt")
 
-# Step 7: Evaluate the model
-y_pred = model.predict(X_test_tfidf)
+train_encodings = encode_texts(X_train.tolist())
+test_encodings = encode_texts(X_test.tolist())
 
-# Print accuracy and classification report
-accuracy = accuracy_score(y_test, y_pred)
-print(f"Accuracy: {accuracy}")
-print(f"Confusion Matrix:\n{confusion_matrix(y_test, y_pred)}")
-print(f"Classification Report:\n{classification_report(y_test, y_pred)}")
+# Convert labels to tensors
+train_labels = torch.tensor(y_train.tolist())
+test_labels = torch.tensor(y_test.tolist())
 
-# Step 8: Make predictions on new text data
-new_text = ["I love this movie! It's amazing.", "I hate this product, it's terrible."]
-new_text_processed = [preprocess_text(text) for text in new_text]
-new_text_tfidf = vectorizer.transform(new_text_processed)
-predictions = model.predict(new_text_tfidf)
+# Create PyTorch datasets
+train_dataset = TensorDataset(train_encodings["input_ids"], train_encodings["attention_mask"], train_labels)
+test_dataset = TensorDataset(test_encodings["input_ids"], test_encodings["attention_mask"], test_labels)
 
-# Print predictions for new text data
-for text, sentiment in zip(new_text, predictions):
-    sentiment_label = "Positive" if sentiment == 4 else "Negative"  # Sentiment value 4 corresponds to positive, 0 to negative
-    print(f"Text: {text}")
-    print(f"Predicted Sentiment: {sentiment_label}")
-    print("---")
+# DataLoader (Batch Processing)
+batch_size = 16
+train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+
+# Load Pre-trained BERT model
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model = BertForSequenceClassification.from_pretrained("bert-base-uncased", num_labels=3).to(device)
+
+# Optimizer
+optimizer = AdamW(model.parameters(), lr=1e-5)
+
+# Training Loop
+num_epochs = 3
+train_losses = []
+val_losses = []
+
+for epoch in range(num_epochs):
+    model.train()
+    total_train_loss = 0
+    
+    for batch in train_loader:
+        input_ids, attention_mask, labels = [b.to(device) for b in batch]
+        
+        optimizer.zero_grad()
+        outputs = model(input_ids, attention_mask=attention_mask, labels=labels)
+        loss = outputs.loss
+        loss.backward()
+        optimizer.step()
+        
+        total_train_loss += loss.item()
+
+    avg_train_loss = total_train_loss / len(train_loader)
+    train_losses.append(avg_train_loss)
+
+    # Validation Step
+    model.eval()
+    total_val_loss = 0
+
+    with torch.no_grad():
+        for batch in test_loader:
+            input_ids, attention_mask, labels = [b.to(device) for b in batch]
+            outputs = model(input_ids, attention_mask=attention_mask, labels=labels)
+            total_val_loss += outputs.loss.item()
+
+    avg_val_loss = total_val_loss / len(test_loader)
+    val_losses.append(avg_val_loss)
+
+    print(f"Epoch {epoch+1}: Train Loss = {avg_train_loss:.4f}, Validation Loss = {avg_val_loss:.4f}")
+
+# Model Evaluation
+model.eval()
+predictions, true_labels = [], []
+
+for batch in test_loader:
+    input_ids, attention_mask, labels = [b.to(device) for b in batch]
+    with torch.no_grad():
+        logits = model(input_ids, attention_mask=attention_mask).logits
+    predictions.extend(torch.argmax(logits, dim=-1).cpu().numpy())
+    true_labels.extend(labels.cpu().numpy())
+
+# Print Metrics
+print(f"Accuracy: {accuracy_score(true_labels, predictions):.4f}")
+print("Confusion Matrix:\n", confusion_matrix(true_labels, predictions))
+print("Classification Report:\n", classification_report(true_labels, predictions))
+
+# Sentiment Prediction Function
+def predict_sentiment(texts):
+    processed_texts = [preprocess_text(text) for text in texts]
+    encodings = encode_texts(processed_texts)
+    
+    input_ids, attention_mask = encodings["input_ids"].to(device), encodings["attention_mask"].to(device)
+    
+    with torch.no_grad():
+        logits = model(input_ids, attention_mask=attention_mask).logits
+        predictions = torch.argmax(logits, dim=-1).cpu().numpy()
+    
+    sentiment_map = {4: "Positive", 0: "Negative", 2: "Neutral"}
+    return [sentiment_map[pred] for pred in predictions]
+
+# Example Sentiment Predictions
+example_texts = ["I love this movie! It's amazing.", "I hate this product, it's terrible.", "It's an okay product."]
+predicted_sentiments = predict_sentiment(example_texts)
+
+for text, sentiment in zip(example_texts, predicted_sentiments):
+    print(f"Text: {text}\nPredicted Sentiment: {sentiment}\n---")
+
+# Save Model & Tokenizer
+model_dir = "bert_sentiment_model"
+tokenizer_dir = "bert_sentiment_tokenizer"
+
+os.makedirs(model_dir, exist_ok=True)
+os.makedirs(tokenizer_dir, exist_ok=True)
+
+model.save_pretrained(model_dir)
+tokenizer.save_pretrained(tokenizer_dir)
+
+print(f"Model & Tokenizer saved to {model_dir} and {tokenizer_dir}")

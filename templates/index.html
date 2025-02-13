@@ -4,21 +4,31 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Sentiment Analysis</title>
-    <link rel="stylesheet" type="text/css" href="{{ url_for('static', filename='style.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
-    <div class="container">
+    <div class="container mt-5">
         <h1>Sentiment Analysis</h1>
-        <form action="/predict" method="post">
-            <textarea name="text" placeholder="Enter your text here..." required></textarea>
-            <br>
-            <button type="submit">Analyze Sentiment</button>
+        <form action="/predict" method="POST">
+            <div class="form-group">
+                <label for="text">Enter Text:</label>
+                <textarea class="form-control" id="text" name="text" rows="4"></textarea>
+            </div>
+            <button type="submit" class="btn btn-primary">Analyze Sentiment</button>
         </form>
-        
+
         {% if prediction %}
-        <div class="result {% if prediction == 'Positive' %}positive{% else %}negative{% endif %}">
-            <p>Sentiment: {{ prediction }}</p>
-        </div>
+            <div class="result {% if prediction == 'Very Positive' %}positive
+                                {% elif prediction == 'Negative' %}negative
+                                {% elif prediction == 'Very Negative' %}negative
+                                {% else %}neutral
+                                {% endif %}">
+                Sentiment: {{ prediction }}
+            </div>
+        {% endif %}
+
+        {% if prediction == "Please enter some text." %}
+            <div class="error">{{ prediction }}</div>
         {% endif %}
     </div>
 </body>
